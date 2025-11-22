@@ -1,18 +1,35 @@
+"""
+Normal behavior simulator - generates benign LLM prompts and logs them.
+
+This script simulates legitimate user interactions with an LLM service,
+creating normal traffic patterns that can be used as a baseline for
+detecting malicious prompt injection attempts.
+"""
+
 import time
 import random
 import requests
 import json
+import os
+import uuid
+from datetime import datetime
 
-PROXY_BASE = "http://blueflux_proxy:8080"
+# CONFIG
+PROXY_URL = "http://llm_proxy:8080/v1/proxy"
+LOG_DIR = "/logs/llm_logs"
+SCENARIO_LOG = f"{LOG_DIR}/scenario_events.jsonl"
 
-# 50 benign prompts
+# Ensure log directory exists
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# 50 benign prompts - normal user questions
 BENIGN_PROMPTS = [
     "What is the weather today?",
     "Tell me a fun fact about space.",
     "How do I cook pasta?",
     "What is the capital of France?",
     "Explain how rainbows work.",
-    "Give me a simple Python function.",
+    "Give me a simple Python function to calculate factorial.",
     "What is quantum entanglement?",
     "Tell me today's top news headline.",
     "Explain HTTP vs HTTPS.",
@@ -21,9 +38,9 @@ BENIGN_PROMPTS = [
     "How does a car engine work?",
     "What is the meaning of life?",
     "How do I improve my focus?",
-    "Explain neural networks.",
+    "Explain neural networks in simple terms.",
     "Tell me a joke.",
-    "Explain recursion.",
+    "Explain recursion with an example.",
     "What are black holes?",
     "How do airplanes fly?",
     "Why is the sky blue?",
@@ -43,7 +60,6 @@ BENIGN_PROMPTS = [
     "How do I make good coffee?",
     "What is the stock market?",
     "What is Rust programming language?",
-    "Explain recursion again.",
     "Tell me how GPS works.",
     "What is entropy?",
     "Give me 3 healthy snacks.",
@@ -53,36 +69,142 @@ BENIGN_PROMPTS = [
     "How does RAM work?",
     "Why do we dream?",
     "Explain evolution.",
-    "Give me a random number.",
     "What is cybersecurity?",
-    "Tell me a bedtime story."
+    "Tell me a bedtime story.",
+    "How do I learn a new language?",
+    "What is the difference between AI and ML?",
+    "Explain how batteries work."
 ]
 
-def send_ai_prompt():
-    prompt = random.choice(BENIGN_PROMPTS)
-    payload = {"message": prompt}
-    resp = requests.post(f"{PROXY_BASE}/v1/proxy", json=payload, timeout=30)
-    print("\n[AI] Prompt:", prompt)
-    print("[AI] Status:", resp.status_code)
-    print("[AI] Snippet:", resp.text[:150])
-
-def send_generic_event():
-    payload = {
-        "event_type": "system_log",
-        "severity": random.choice(["INFO", "WARN"]),
-        "component": random.choice(["auth", "billing", "ui", "cache"]),
-        "message": "Routine activity",
+def log_event(event_type, data, session_id=None):
+    """
+    Unified logging function - same format as scenario_runner for consistency.
+    Format matches BlueFlux telemetry model for easy correlation.
+    """
+    if session_id is None:
+        session_id = f"normal-{uuid.uuid4().hex[:8]}"
+    
+    event = {
         "timestamp": time.time(),
+        "timestamp_iso": datetime.utcnow().isoformat() + "Z",
+        "session_id": session_id,
+        "event_type": event_type,  # "llm_request", "llm_response", "normal_activity"
+        "source": "normal_behavior",  # Identifies this as normal traffic
+        "data": data
     }
-    resp = requests.post(f"{PROXY_BASE}/v1/proxy", json=payload)
-    print("\n[GENERIC] Event sent | Status:", resp.status_code)
+    
+    with open(SCENARIO_LOG, "a") as f:
+        f.write(json.dumps(event) + "\n")
+    
+    print(f"[NORMAL] {event_type}: {json.dumps(data)[:100]}...")
+
+
+def send_benign_prompt(session_id):
+    """
+    Sends a benign prompt to the LLM proxy and logs the interaction.
+    """
+    prompt = random.choice(BENIGN_PROMPTS)
+    
+    # Log the request
+    log_event("llm_request", {
+        "prompt": prompt,
+        "prompt_type": "benign",
+        "proxy_url": PROXY_URL
+    }, session_id)
+    
+    try:
+        # Send to proxy in the same format it expects
+        response = requests.post(
+            PROXY_URL,
+            data={"message": prompt},  # Form-encoded, same as scenario_runner
+            timeout=30,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        
+        if response.status_code == 200:
+            try:
+                resp_data = response.json()
+                # Extract message from GraphQL response format
+                message = ""
+                if "data" in resp_data:
+                    node = resp_data.get("data", {}).get("node", {})
+                    bot_msg = node.get("bot_response_message", {})
+                    composed = bot_msg.get("composed_text", {})
+                    content = composed.get("content", [])
+                    if content and len(content) > 0:
+                        message = content[0].get("text", "")
+                
+                log_event("llm_response", {
+                    "status": "success",
+                    "prompt": prompt,
+                    "response_length": len(message),
+                    "response_preview": message[:200] if message else "No message extracted"
+                }, session_id)
+                return True
+            except Exception as e:
+                log_event("llm_response", {
+                    "status": "success",
+                    "prompt": prompt,
+                    "raw_response": response.text[:500],
+                    "parse_error": str(e)
+                }, session_id)
+                return True
+        else:
+            log_event("llm_response", {
+                "status": "error",
+                "prompt": prompt,
+                "error": f"HTTP {response.status_code}: {response.text[:200]}"
+            }, session_id)
+            return False
+            
+    except Exception as e:
+        log_event("llm_response", {
+            "status": "error",
+            "prompt": prompt,
+            "error": str(e)
+        }, session_id)
+        return False
+
+
+def log_normal_activity(session_id):
+    """
+    Logs normal system activity (not LLM-related).
+    """
+    activities = [
+        {"type": "user_login", "user_id": f"user_{random.randint(1000, 9999)}"},
+        {"type": "page_view", "page": random.choice(["/home", "/dashboard", "/settings"])},
+        {"type": "api_call", "endpoint": random.choice(["/api/users", "/api/data", "/api/config"])},
+        {"type": "file_upload", "file_type": random.choice(["image", "document", "video"])},
+        {"type": "search_query", "query": random.choice(["product", "documentation", "help"])},
+    ]
+    
+    activity = random.choice(activities)
+    log_event("normal_activity", activity, session_id)
+
 
 def main():
+    """
+    Main loop: generates normal behavior patterns.
+    Alternates between benign LLM prompts and normal system activities.
+    """
+    print("[*] Normal Behavior Simulator Started")
+    print(f"[*] Logging to: {SCENARIO_LOG}")
+    print("[*] Generating benign prompts and normal activity...")
+    
     while True:
-        send_generic_event()
-        time.sleep(random.uniform(1, 3))
-        send_ai_prompt()
-        time.sleep(random.uniform(2, 4))
+        session_id = f"normal-{int(time.time())}-{random.randint(1000, 9999)}"
+        
+        # Sometimes log normal activity
+        if random.random() < 0.3:  # 30% chance
+            log_normal_activity(session_id)
+            time.sleep(random.uniform(0.5, 1.5))
+        
+        # Send a benign prompt
+        send_benign_prompt(session_id)
+        
+        # Wait before next interaction (normal users don't spam)
+        time.sleep(random.uniform(3, 8))  # 3-8 seconds between requests
+
 
 if __name__ == "__main__":
     main()

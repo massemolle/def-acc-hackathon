@@ -40,6 +40,21 @@ services:
     networks:
       - blueflux_net
 
+  normal_behavior:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.normal_behavior
+    container_name: blueflux_normal
+    volumes:
+      - ./logs/llm_logs:/logs/llm_logs
+    depends_on:
+      - llm_proxy
+    environment:
+      - TZ=UTC
+      - PROXY_URL=http://llm_proxy:8080
+    networks:
+      - blueflux_net
+
 networks:
   blueflux_net:
     driver: bridge

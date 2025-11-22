@@ -1,0 +1,18 @@
+# Dockerfile for normal behavior simulator
+# Generates benign LLM prompts and normal activity logs
+
+FROM python:3.10-slim
+
+# Install Python dependencies
+COPY requirements.txt /app/
+RUN pip install -r /app/requirements.txt
+
+# Copy the normal behavior script
+COPY attack_scenarios/normal_behavior.py /app/normal_behavior.py
+
+# Set working directory
+WORKDIR /app
+
+# Run the normal behavior simulator
+CMD ["python3", "/app/normal_behavior.py"]
+
