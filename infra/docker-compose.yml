@@ -15,8 +15,7 @@ services:
       dockerfile: infra/Dockerfile.llm_proxy
     container_name: blueflux_proxy
     volumes:
-      - ./data:/data
-      - ./logs/llm_logs:/data/llm_logs
+      - ./logs/llm_logs:/logs/llm_logs
     ports:
       - "8080:8080"
     env_file:
@@ -32,8 +31,7 @@ services:
       dockerfile: infra/Dockerfile.attacker
     container_name: blueflux_attacker
     volumes:
-      - ./data:/data
-      - ./logs/llm_logs:/data/llm_logs
+      - ./logs/llm_logs:/logs/llm_logs
     depends_on:
       - llm_proxy
     environment:

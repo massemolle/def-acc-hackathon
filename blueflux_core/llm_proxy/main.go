@@ -13,33 +13,36 @@ import (
 	"time"
 )
 
-// LogEntry matches the BlueFlux Telemetry format with enhanced correlation
+// ======================= LOGGING TYPES =======================
+
+// LogEntry is the unified telemetry record used by BlueFlux.
+// It now includes:
+// - event_type: high-level category (llm_request, llm_response, generic_request, etc.)
+// - llm_prompt: extracted LLM question (for LLM requests)
+// - llm_answer: extracted LLM answer (for LLM responses)
 type LogEntry struct {
-	Timestamp    float64                `json:"timestamp"`      // Unix timestamp for programmatic use
-	TimestampISO string                 `json:"timestamp_iso"`  // Human-readable ISO 8601 format
-	SessionID    string                 `json:"session_id"`
-	Type         string                 `json:"type"`           // "request", "response", "error"
-	Content      string                 `json:"content"`
+	Timestamp    float64                `json:"timestamp"`               // Unix timestamp
+	TimestampISO string                 `json:"timestamp_iso"`           // ISO 8601
+	SessionID    string                 `json:"session_id"`              // Correlates request/response
+	Type         string                 `json:"type"`                    // "request", "response", "error"
+	EventType    string                 `json:"event_type,omitempty"`    // "llm_request", "llm_response", ...
+	Content      string                 `json:"content"`                 // Raw body (request or response)
 	SourceIP     string                 `json:"source_ip,omitempty"`
 	UserAgent    string                 `json:"user_agent,omitempty"`
 	Method       string                 `json:"method,omitempty"`
 	Path         string                 `json:"path,omitempty"`
 	Status       int                    `json:"status,omitempty"`
 	Duration     float64                `json:"duration_ms,omitempty"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	Prompt       string                 `json:"llm_prompt,omitempty"`    // Extracted LLM prompt
+	Answer       string                 `json:"llm_answer,omitempty"`    // Extracted LLM answer
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`      // Extra structured data
 }
 
-// Log File Path (Shared Volume)
-// Maps to host path: infra/data/llm_logs/proxy.jsonl (because ./data:/data in docker-compose.yml)
-const LogFile = "/data/llm_logs/proxy.jsonl"
+// Log file path (shared volume)
+// Maps to host path: infra/logs/llm_logs/proxy.jsonl (because ./logs/llm_logs:/logs/llm_logs in docker-compose.yml)
+const LogFile = "/logs/llm_logs/proxy.jsonl"
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
+// appendLog writes one JSON line to the telemetry file and a short snippet to stdout.
 func appendLog(entry LogEntry) {
 	// Ensure timestamp_iso is set if not already
 	if entry.TimestampISO == "" && entry.Timestamp > 0 {
@@ -47,8 +50,8 @@ func appendLog(entry LogEntry) {
 	}
 
 	// Ensure log directory exists
-	if err := os.MkdirAll("/data/llm_logs", 0755); err != nil {
-		log.Printf("[ERROR] Failed to create log directory /data/llm_logs: %v", err)
+	if err := os.MkdirAll("/logs/llm_logs", 0755); err != nil {
+		log.Printf("[ERROR] Failed to create log directory /logs/llm_logs: %v", err)
 		return
 	}
 
@@ -59,17 +62,19 @@ func appendLog(entry LogEntry) {
 	}
 	defer f.Close()
 
-	bytes, _ := json.Marshal(entry)
-	if _, err := f.WriteString(string(bytes) + "\n"); err != nil {
+	b, _ := json.Marshal(entry)
+	if _, err := f.WriteString(string(b) + "\n"); err != nil {
 		log.Printf("[ERROR] Failed to write to log file %s: %v", LogFile, err)
 		return
 	}
 
+	// Console snippet – keep it short for readability
 	snippet := entry.Content
-	if len(snippet) > 100 {
-		snippet = snippet[:100]
+	if len(snippet) > 120 {
+		snippet = snippet[:120]
 	}
-	log.Printf("[TELEMETRY] %s [%s]: %s", entry.Type, entry.TimestampISO, snippet)
+	log.Printf("[TELEMETRY] type=%s event_type=%s ts=%s session=%s snippet=%q",
+		entry.Type, entry.EventType, entry.TimestampISO, entry.SessionID, snippet)
 }
 
 // ======================= PROMPT EXTRACTION =======================
@@ -83,28 +88,25 @@ func extractPromptFromJSON(body []byte) (string, bool, error) {
 		return "", false, fmt.Errorf("failed to parse JSON body: %v", err)
 	}
 
-	// Meta-style JSON could have other shapes, but for our own tests we use "message"
 	if msg, ok := obj["message"].(string); ok && msg != "" {
 		return msg, true, nil
 	}
 
-	// No "message" → not an AI prompt, just normal API/app traffic
+	// No "message" → not an AI prompt
 	return "", false, nil
 }
 
-// extractPromptFromForm parses form-encoded request and extracts the prompt
-// Handles both GraphQL format (from real malware) and simple form format (from fallback)
+// extractPromptFromForm parses form-encoded data and extracts prompts.
+// Returns: (prompt, isPromptRequest, isAuthTOS, error)
 func extractPromptFromForm(body []byte) (string, bool, bool, error) {
-	// returns: (prompt, isPromptRequest, isAuthTOS, error)
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
 		return "", false, false, fmt.Errorf("failed to parse form data: %v", err)
 	}
 
-	// Detect explicit Meta auth/TOS
+	// Detect Meta auth/TOS
 	reqName := values.Get("fb_api_req_friendly_name")
 	if reqName == "useAbraAcceptTOSForTempUserMutation" {
-		// Auth/TOS request, not a normal prompt
 		return "", false, true, nil
 	}
 
@@ -135,7 +137,6 @@ func extractPromptFromForm(body []byte) (string, bool, bool, error) {
 
 	message, ok := variables["message"].(map[string]interface{})
 	if !ok {
-		// Not a prompt, some other GraphQL operation
 		return "", false, false, nil
 	}
 
@@ -148,8 +149,8 @@ func extractPromptFromForm(body []byte) (string, bool, bool, error) {
 }
 
 // extractPrompt is the unified entry point:
-// - If Content-Type is JSON → use extractPromptFromJSON
-// - If form-encoded → use extractPromptFromForm
+// - JSON → extractPromptFromJSON
+// - otherwise → treat as form-encoded (Meta-style)
 func extractPrompt(r *http.Request, body []byte) (prompt string, isPrompt bool, isAuthTOS bool, err error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.Contains(ct, "application/json") {
@@ -157,15 +158,15 @@ func extractPrompt(r *http.Request, body []byte) (prompt string, isPrompt bool, 
 		return prompt, isPrompt, false, err
 	}
 
-	// Default: treat as form-encoded (Meta)
 	prompt, isPrompt, isAuthTOS, err = extractPromptFromForm(body)
 	return prompt, isPrompt, isAuthTOS, err
 }
 
 // ======================= OPENROUTER FORWARDING =======================
 
-// forwardToOpenRouter forwards the request to OpenRouter API and returns the FULL response
-// Returns both the extracted message and the raw response for complete logging
+// forwardToOpenRouter forwards the prompt to OpenRouter and returns:
+// - metaResp: structured map containing "message" and associated data
+// - rawResponse: raw JSON string from OpenRouter
 func forwardToOpenRouter(prompt string, stream bool) (map[string]interface{}, string, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	apiURL := os.Getenv("OPENROUTER_API_URL")
@@ -233,6 +234,7 @@ func forwardToOpenRouter(prompt string, stream bool) (map[string]interface{}, st
 		return nil, rawResponse, fmt.Errorf("failed to parse OpenRouter JSON: %v", err)
 	}
 
+	// Extract final message content
 	msg := ""
 	if choices, ok := openResp["choices"].([]interface{}); ok && len(choices) > 0 {
 		if ch, ok := choices[0].(map[string]interface{}); ok {
@@ -263,7 +265,6 @@ func forwardToOpenRouter(prompt string, stream bool) (map[string]interface{}, st
 func forwardToUpstream(r *http.Request, body []byte) ([]byte, int, error) {
 	upstream := os.Getenv("UPSTREAM_URL")
 	if upstream == "" {
-		// Stub response: useful for testing without a real backend
 		stub := map[string]interface{}{
 			"status": "ok",
 			"note":   "no UPSTREAM_URL configured, stub response from proxy",
@@ -285,7 +286,7 @@ func forwardToUpstream(r *http.Request, body []byte) ([]byte, int, error) {
 
 	// Copy headers except Host
 	for k, v := range r.Header {
-		if strings.ToLower(k) == "host" {
+		if strings.EqualFold(k, "Host") {
 			continue
 		}
 		for _, vv := range v {
@@ -317,12 +318,10 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		clientIP = forwarded
 	}
 
-	// Session ID: IP + timestamp
 	sessionID := fmt.Sprintf("%s-%d", clientIP, time.Now().UnixNano())
-
 	log.Printf("[PROXY] Incoming request from %s to %s %s", clientIP, r.Method, r.URL.Path)
 
-	// Read body
+	// Read and restore body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("[ERROR] Failed to read request body: %v", err)
@@ -332,24 +331,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	now := time.Now()
-	appendLog(LogEntry{
-		Timestamp:    float64(now.Unix()),
-		TimestampISO: now.UTC().Format(time.RFC3339),
-		SessionID:    sessionID,
-		Type:         "request",
-		Content:      string(body),
-		SourceIP:     clientIP,
-		UserAgent:    r.Header.Get("User-Agent"),
-		Method:       r.Method,
-		Path:         r.URL.Path,
-		Metadata: map[string]interface{}{
-			"content_length": len(body),
-			"headers":        r.Header,
-		},
-	})
-
-	// Health-path shortcut (for safety, though you already have /health)
+	// Health endpoint
 	if r.URL.Path == "/health" {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -357,15 +339,43 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract prompt / classify request
-	prompt, isPromptRequest, isAuthTOS, err := extractPrompt(r, body)
-	if err != nil {
-		log.Printf("[WARN] Prompt extraction error: %v", err)
+	prompt, isPromptRequest, isAuthTOS, extractErr := extractPrompt(r, body)
+	if extractErr != nil {
+		log.Printf("[WARN] Prompt extraction error: %v", extractErr)
 		log.Printf("[DEBUG] Request body: %s", string(body))
 	}
 
-	// Auth/TOS (Meta-style)
+	// Decide event_type for this incoming request
+	eventType := "generic_request"
+	if isAuthTOS {
+		eventType = "auth_tos_request"
+	} else if isPromptRequest && prompt != "" {
+		eventType = "llm_request"
+	}
+
+	now := time.Now()
+	appendLog(LogEntry{
+		Timestamp:    float64(now.Unix()),
+		TimestampISO: now.UTC().Format(time.RFC3339),
+		SessionID:    sessionID,
+		Type:         "request",
+		EventType:    eventType,
+		Content:      string(body),
+		SourceIP:     clientIP,
+		UserAgent:    r.Header.Get("User-Agent"),
+		Method:       r.Method,
+		Path:         r.URL.Path,
+		Prompt:       prompt,
+		Metadata: map[string]interface{}{
+			"content_length": len(body),
+			"headers":        r.Header,
+		},
+	})
+
+	// ======================= AUTH/TOS SHORTCUT =======================
 	if isAuthTOS {
 		log.Printf("[PROXY] Auth/TOS request detected, returning mock success")
+
 		authResponse := map[string]interface{}{
 			"data": map[string]interface{}{
 				"xab_abra_accept_terms_of_service": map[string]interface{}{
@@ -376,6 +386,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		respBytes, _ := json.Marshal(authResponse)
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(respBytes)
@@ -386,6 +397,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			TimestampISO: now.UTC().Format(time.RFC3339),
 			SessionID:    sessionID,
 			Type:         "response",
+			EventType:    "auth_tos_response",
 			Content:      string(respBytes),
 			SourceIP:     clientIP,
 			Status:       http.StatusOK,
@@ -397,9 +409,9 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// AI prompt path
+	// ======================= LLM PATH =======================
 	if isPromptRequest && prompt != "" {
-		log.Printf("[PROXY] Extracted AI prompt (length: %d): %s", len(prompt), prompt)
+		log.Printf("[PROXY] Extracted AI prompt (len=%d): %s", len(prompt), prompt)
 
 		stream := r.URL.Query().Get("stream") == "true" ||
 			strings.Contains(r.Header.Get("Accept"), "text/event-stream")
@@ -408,17 +420,19 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("[ERROR] OpenRouter API forwarding failed: %v", err)
 
+			now := time.Now()
 			appendLog(LogEntry{
-				Timestamp:    float64(time.Now().Unix()),
-				TimestampISO: time.Now().UTC().Format(time.RFC3339),
+				Timestamp:    float64(now.Unix()),
+				TimestampISO: now.UTC().Format(time.RFC3339),
 				SessionID:    sessionID,
 				Type:         "error",
+				EventType:    "error",
 				Content:      fmt.Sprintf("OpenRouter API call failed: %v", err),
 				SourceIP:     clientIP,
 				Status:       http.StatusBadGateway,
+				Prompt:       prompt,
 				Metadata: map[string]interface{}{
 					"error_type": "openrouter_forwarding_failed",
-					"prompt":     prompt,
 					"raw_error":  rawMetaResponse,
 				},
 			})
@@ -429,18 +443,22 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 				},
 			}
 			respBytes, _ := json.Marshal(errorResp)
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			w.Write(respBytes)
 
+			now = time.Now()
 			appendLog(LogEntry{
-				Timestamp:    float64(time.Now().Unix()),
-				TimestampISO: time.Now().UTC().Format(time.RFC3339),
+				Timestamp:    float64(now.Unix()),
+				TimestampISO: now.UTC().Format(time.RFC3339),
 				SessionID:    sessionID,
 				Type:         "response",
+				EventType:    "llm_response",
 				Content:      string(respBytes),
 				SourceIP:     clientIP,
 				Status:       http.StatusBadGateway,
+				Prompt:       prompt,
 				Duration:     float64(time.Since(startTime).Milliseconds()),
 				Metadata: map[string]interface{}{
 					"error": true,
@@ -449,49 +467,34 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[PROXY] Meta AI returned full response (length: %d bytes)", len(rawMetaResponse))
-		log.Printf("[PROXY] Full Meta AI response: %s", rawMetaResponse)
+		log.Printf("[PROXY] LLM raw response length=%d bytes", len(rawMetaResponse))
 
-		// Wrap into GraphQL-like structure expected by malware
-		var graphQLResp map[string]interface{}
-		if message, ok := metaResp["message"].(string); ok {
-			graphQLResp = map[string]interface{}{
-				"data": map[string]interface{}{
-					"node": map[string]interface{}{
-						"bot_response_message": map[string]interface{}{
-							"id":              fmt.Sprintf("%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000000),
-							"streaming_state": "OVERALL_DONE",
-							"composed_text": map[string]interface{}{
-								"content": []map[string]interface{}{
-									{"text": message},
-								},
-							},
-							"fetch_id": "",
-						},
-					},
-				},
-			}
-		} else {
-			graphQLResp = map[string]interface{}{
-				"data": map[string]interface{}{
-					"node": map[string]interface{}{
-						"bot_response_message": map[string]interface{}{
-							"id":              fmt.Sprintf("%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000000),
-							"streaming_state": "OVERALL_DONE",
-							"composed_text": map[string]interface{}{
-								"content": []map[string]interface{}{
-									{"text": rawMetaResponse},
-								},
-							},
-							"fetch_id": "",
-						},
-					},
-				},
-			}
+		// Extract the plain answer string from metaResp
+		llmAnswer, _ := metaResp["message"].(string)
+		if llmAnswer == "" {
+			llmAnswer = rawMetaResponse
 		}
 
-		duration := time.Since(startTime)
+		// Wrap into GraphQL-like structure expected by malware
+		graphQLResp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"bot_response_message": map[string]interface{}{
+						"id":              fmt.Sprintf("%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000000),
+						"streaming_state": "OVERALL_DONE",
+						"composed_text": map[string]interface{}{
+							"content": []map[string]interface{}{
+								{"text": llmAnswer},
+							},
+						},
+						"fetch_id": "",
+					},
+				},
+			},
+		}
+
 		respBytes, _ := json.Marshal(graphQLResp)
+		duration := time.Since(startTime)
 		now = time.Now()
 
 		appendLog(LogEntry{
@@ -499,9 +502,12 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			TimestampISO: now.UTC().Format(time.RFC3339),
 			SessionID:    sessionID,
 			Type:         "response",
+			EventType:    "llm_response",
 			Content:      string(respBytes),
 			SourceIP:     clientIP,
 			Status:       http.StatusOK,
+			Prompt:       prompt,
+			Answer:       llmAnswer,
 			Duration:     float64(duration.Milliseconds()),
 			Metadata: map[string]interface{}{
 				"response_size":       len(respBytes),
@@ -511,7 +517,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 
-		log.Printf("[PROXY] Request completed in %v, response size: %d bytes", duration, len(respBytes))
+		log.Printf("[PROXY] LLM request completed in %v, response size=%d bytes", duration, len(respBytes))
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -520,16 +526,19 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Non-AI traffic: either generic JSON or some app chatter
+	// ======================= GENERIC PATH =======================
+
 	respBytes, status, err := forwardToUpstream(r, body)
 	if err != nil {
 		log.Printf("[ERROR] Upstream forwarding failed: %v", err)
 
+		now := time.Now()
 		appendLog(LogEntry{
-			Timestamp:    float64(time.Now().Unix()),
-			TimestampISO: time.Now().UTC().Format(time.RFC3339),
+			Timestamp:    float64(now.Unix()),
+			TimestampISO: now.UTC().Format(time.RFC3339),
 			SessionID:    sessionID,
 			Type:         "error",
+			EventType:    "error",
 			Content:      fmt.Sprintf("Upstream forwarding failed: %v", err),
 			SourceIP:     clientIP,
 			Status:       http.StatusBadGateway,
@@ -549,12 +558,13 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		TimestampISO: now.UTC().Format(time.RFC3339),
 		SessionID:    sessionID,
 		Type:         "response",
+		EventType:    "generic_response",
 		Content:      string(respBytes),
 		SourceIP:     clientIP,
 		Status:       status,
 		Duration:     float64(duration.Milliseconds()),
 		Metadata: map[string]interface{}{
-			"request_type": "generic",
+			"request_type":  "generic",
 			"response_size": len(respBytes),
 		},
 	})
@@ -568,8 +578,8 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	// Ensure log directory exists at startup
-	if err := os.MkdirAll("/data/llm_logs", 0755); err != nil {
-		log.Fatalf("[FATAL] Failed to create log directory /data/llm_logs: %v", err)
+	if err := os.MkdirAll("/logs/llm_logs", 0755); err != nil {
+		log.Fatalf("[FATAL] Failed to create log directory /logs/llm_logs: %v", err)
 	}
 
 	// Health endpoint
@@ -578,10 +588,8 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	// Main proxy endpoint
+	// Main proxy endpoint(s)
 	http.HandleFunc("/v1/proxy", proxyHandler)
-
-	// Catch-all for GraphQL-like endpoints
 	http.HandleFunc("/graphql", proxyHandler)
 	http.HandleFunc("/api/graphql/", proxyHandler)
 	http.HandleFunc("/", proxyHandler)

@@ -22,7 +22,7 @@ from pathlib import Path
 # CONFIG
 PROXY_URL = "http://llm_proxy:8080/v1/proxy"  # Fixed: correct port and endpoint
 GO_BINARY = "/app/attack_tools/AI-malware/malware_gen"
-LOG_DIR = "/data/llm_logs"
+LOG_DIR = "/logs/llm_logs"
 SCENARIO_LOG = f"{LOG_DIR}/scenario_events.jsonl"
 
 # Ensure log directory exists
