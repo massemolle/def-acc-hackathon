@@ -18,6 +18,8 @@ services:
       - ./data:/data
     ports:
       - "8080:8080"
+    env_file:
+      - ../.env
     environment:
       - TZ=UTC
     networks:

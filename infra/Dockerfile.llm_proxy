@@ -1,5 +1,5 @@
-# Dockerfile for the LLM proxy service (Grok proxy)
-# Copies API code from malware repo to enable Meta AI forwarding
+# Dockerfile for the LLM proxy service
+# Uses OpenRouter API instead of Meta AI directly
 
 FROM golang:1.21
 
@@ -8,13 +8,8 @@ WORKDIR /app
 # Copy the proxy main.go
 COPY blueflux_core/llm_proxy/main.go .
 
-# Copy the API package from malware repo (needed for Meta AI client)
-COPY attack_scenarios/ai_malware/AI-malware/api/ ./api/
-
 # Initialize Go module and install dependencies
 RUN go mod init llm_proxy || true
-RUN go get github.com/google/uuid
-RUN go get github.com/PuerkitoBio/goquery@v1.8.1
 RUN go mod tidy
 
 # Build the proxy server
