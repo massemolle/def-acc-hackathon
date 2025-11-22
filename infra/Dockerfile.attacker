@@ -20,5 +20,7 @@ COPY infra/setup_malware.sh /app/setup_malware.sh
 # 6. Make the setup script executable
 RUN chmod +x /app/setup_malware.sh
 
-# 7. Run the setup script (which compiles the malware) AND then the python controller
+# 7. Run the setup script (which compiles the malware) AND then the scenario runner
+# The setup script patches URLs and builds the malware
+# Then scenario_runner.py orchestrates everything with unified logging
 CMD ["/app/setup_malware.sh"]

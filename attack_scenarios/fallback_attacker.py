@@ -5,8 +5,9 @@ import requests
 import sys
 import os
 
-# CONFIG
-PROXY_URL = "http://llm_proxy:8000/v1/chat/completions"
+# CONFIG - DEPRECATED: Use scenario_runner.py instead
+# This file is kept for backward compatibility but scenario_runner.py is the main orchestrator
+PROXY_URL = "http://llm_proxy:8080/v1/proxy"  # Fixed: correct port and endpoint
 GO_BINARY = "/app/attack_tools/AI-malware/malware_gen"
 
 # ASCII Art from ai-malware.go
