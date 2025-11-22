@@ -16,6 +16,7 @@ services:
     container_name: blueflux_proxy
     volumes:
       - ./data:/data
+      - ./logs/llm_logs:/data/llm_logs
     ports:
       - "8080:8080"
     env_file:
@@ -32,6 +33,7 @@ services:
     container_name: blueflux_attacker
     volumes:
       - ./data:/data
+      - ./logs/llm_logs:/data/llm_logs
     depends_on:
       - llm_proxy
     environment:
