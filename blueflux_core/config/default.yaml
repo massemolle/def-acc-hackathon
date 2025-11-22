@@ -1,0 +1,7 @@
+# Configuration file for BlueFlux
+# Contains:
+#   - thresholds for risk scoring
+#   - paths to telemetry sources
+#   - enabled analyzers list
+#   - analyzer-specific parameters
+

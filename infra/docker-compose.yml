@@ -1,0 +1,8 @@
+# Docker Compose configuration for the complete hackathon environment
+# Defines services for attacker, proxy, network capture, and agent
+# Expresses how volumes are shared between services:
+#   - telemetry logs
+#   - PCAP/flow summaries
+#   - BlueFlux output reports
+# Serves as a single "run this to see the demo" artifact
+
