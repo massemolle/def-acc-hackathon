@@ -2,7 +2,8 @@
 # Defines services for attacker, proxy, network capture, and agent
 # Expresses how volumes are shared between services:
 #   - telemetry logs
-#   - PCAP/flow summaries
+#   - PCAP/flow summaries be carefull here, can slow down everything, see network dockerfile
 #   - BlueFlux output reports
 # Serves as a single "run this to see the demo" artifact
 
+#Docker log timestamps and Network timestamps might drift. Ensure all containers use UTC

@@ -1,2 +1,5 @@
 # Dockerfile for the network capture service
+"""
+Configure tshark in the net_capture container to output JSON logs directly (tshark -T ek or -T json). Do not parse binary PCAP in your python code
+"""
 
