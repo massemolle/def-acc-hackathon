@@ -1,2 +1,24 @@
-# Dockerfile for the attacker simulation service
+FROM python:3.10-slim
 
+# 1. Install Go, Git, and Curl (Required for the tool and patching)
+RUN apt-get update && apt-get install -y golang git curl
+
+# 2. Set working directory
+WORKDIR /app/attack_tools
+
+# 3. CLONE THE REPO (This gets the code inside the container)
+RUN git clone https://github.com/elmerikh/AI-malware.git
+
+# 4. Install Python dependencies for your fallback/wrapper
+COPY requirements.txt /app/
+RUN pip install -r /app/requirements.txt
+
+# 5. Copy your scripts
+COPY attack_scenarios /app/attack_scenarios
+COPY infra/setup_malware.sh /app/setup_malware.sh
+
+# 6. Make the setup script executable
+RUN chmod +x /app/setup_malware.sh
+
+# 7. Run the setup script (which compiles the malware) AND then the python controller
+CMD ["/app/setup_malware.sh"]

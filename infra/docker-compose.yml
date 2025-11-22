@@ -7,3 +7,37 @@
 # Serves as a single "run this to see the demo" artifact
 
 #Docker log timestamps and Network timestamps might drift. Ensure all containers use UTC
+
+services:
+  llm_proxy:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.llm_proxy
+    container_name: blueflux_proxy
+    volumes:
+      - ./data:/data
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=UTC
+    networks:
+      - blueflux_net
+
+  attacker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.attacker
+    container_name: blueflux_attacker
+    volumes:
+      - ./data:/data
+    depends_on:
+      - llm_proxy
+    environment:
+      - TZ=UTC
+      - PROXY_URL=http://llm_proxy:8080
+    networks:
+      - blueflux_net
+
+networks:
+  blueflux_net:
+    driver: bridge
