@@ -7,11 +7,15 @@ Applies heuristics such as:
 
 Emits a risk contribution based on how strange the traffic is.
 """
+from transformers import AutoTokenizer, AutoModel
 from dataclasses import dataclass, field
 import pandas as pd 
+import torch
 import json
 
 from blueflux_core.analyzers.logger_config import setup_logger
+
+TOKENIZER_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 logger = setup_logger()
 
@@ -90,6 +94,43 @@ def one_hot_encode_event_types(df: pd.DataFrame, column: str = "event_types") ->
     return df
 
 
+def text_to_embedding(tokenizer, model, text: str) -> list[str]:
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        padding=True
+    )
+
+    # Forward pass
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    token_embeddings = outputs.last_hidden_state      
+    input_mask = inputs["attention_mask"]
+
+    embeddings = (token_embeddings * input_mask.unsqueeze(-1)).sum(1)
+    embeddings = embeddings / input_mask.sum(1, keepdim=True)
+
+    return embeddings.squeeze() 
+
+
+def output_processing(df: pd.DataFrame) -> pd.DataFrame:
+    """ Final processing steps before analysis. """
+
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_MODEL)
+    model = AutoModel.from_pretrained(TOKENIZER_MODEL)  
+
+    outputs = []
+    for _, (_, row) in enumerate(df.iterrows()):
+        events_list = row['data']        
+        for event in events_list:
+            if 'output' in event:
+                outputs.append(text_to_embedding(tokenizer, model, event['output']))
+            else:
+                outputs.append(None)
+
+
 @dataclass
 class NetworkBehaviorScenario:
     path: str
@@ -114,6 +155,13 @@ class NetworkBehaviorScenario:
         event_type_counts_df.index = self.data.index
         self.data = pd.concat([self.data, event_type_counts_df], axis=1)
         self.data = one_hot_encode_event_types(self.data, column="event_types")
+        self.data['outputs'] = output_processing(self.data)
+        
+        # delete data column
+        del self.data['data']
+
+    def return_data(self) -> pd.DataFrame:
+        return self.data
 
 
 if __name__ == "__main__":
@@ -125,4 +173,4 @@ if __name__ == "__main__":
                                       skip_n_rows=10, 
                                       time_window_size='5s')
     
-    netscen.data.to_parquet("infra/data/network_behavior_dataset.parquet")
+    print(netscen.data)
